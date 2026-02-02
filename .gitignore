@@ -1,0 +1,27 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual env
+venv/
+env/
+
+# Logs
+logs/
+*.log
+
+# Data
+data/
+data_archive/
+data_quarantine/
+*.csv
+*.pkl
+
+# Models
+models/
+*.joblib
+
+# Reports
+reports/
+*.png
+*.json
