@@ -10,6 +10,40 @@ The system predicts scrap quantity for a Machine–Tool–Part combination using
 
 ## 3. System Architecture
 
+```mermaid
+graph LR
+    subgraph "Legacy / Raw Data Layer"
+        A[☁️ M231.csv (1.5GB)]
+        B[☁️ M356.csv (1.5GB)]
+        C[☁️ M471.csv (1.5GB)]
+        D[☁️ ...Others]
+    end
+
+    subgraph "ETL & Optimization Layer"
+        E[⚙️ Python Preprocessor]
+        F[📉 Downcasting & Cleaning]
+        G[📦 Parquet Conversion]
+    end
+
+    subgraph "Application Layer"
+        H[🚀 Optimized_Data.parquet (Compressed)]
+        I[📊 Streamlit Dashboard]
+        J[🧠 AI Model]
+    end
+
+    A & B & C & D --> E
+    E --> F --> G
+    G --> H
+    H --> I
+    I --> J
+
+    style A fill:#ffcccc,stroke:#333
+    style B fill:#ffcccc,stroke:#333
+    style C fill:#ffcccc,stroke:#333
+    style H fill:#ccffcc,stroke:#333
+    style I fill:#ccffcc,stroke:#333
+```
+
 ### A. The AI Model (XGBoost)
 * **Role:** Predicts probability of scrap based on sensor inputs.
 * **Features:** Uses 39 features, including:

@@ -303,6 +303,7 @@ def get_cached_data() -> pd.DataFrame:
     """
     Loads the main dataset with Aggressive Memory Optimization.
     Prevents 'Unable to allocate' errors on local machines.
+    NOTE: Keep this function widget-free to avoid CachedWidgetWarning.
     """
     try:
         # 1. Load Data
@@ -328,21 +329,52 @@ def get_cached_data() -> pd.DataFrame:
 
         return df
     except Exception as e:
-        st.error(f"⚠️ Data Load Error: {e}")
-        st.warning("The cached dataset might be too large for your RAM.")
-        if st.button("🗑️ Delete Cache & Retry"):
-            try:
-                cache_path = DATA_DIR / "processed_full_dataset.pkl"
-                if cache_path.exists():
-                    cache_path.unlink()
-                st.success("Cache deleted. Please refresh the page.")
-            except Exception as del_err:
-                st.error(f"Could not delete cache: {del_err}")
+        logger.exception("Data load failed in cached loader: %s", e)
         return pd.DataFrame()
 
 def load_data() -> pd.DataFrame:
     """Single entry point for dashboard data loading."""
     return get_cached_data()
+
+
+def render_performance_status(df: pd.DataFrame) -> None:
+    """Displays the current data engine status and freshness badge."""
+    parquet_path = DATA_DIR / "demo_ready_data.parquet"
+    optimized_rows = len(df) if isinstance(df, pd.DataFrame) else 0
+
+    st.divider()
+    st.subheader("🖥️ System Health")
+
+    if parquet_path.exists():
+        mtime = parquet_path.stat().st_mtime
+        last_run = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        hours_since_run = (time.time() - mtime) / 3600
+        freshness = max(0, min(100, 100 - (hours_since_run / 24 * 100)))
+
+        st.success("🚀 **Mode:** High-Performance")
+        st.caption("Engine: **Parquet-Native**")
+        st.caption(f"Last Optimized: **{last_run}**")
+        st.caption(f"Optimized Rows: **{optimized_rows:,}**")
+        st.progress(int(freshness), text=f"Data Freshness: {int(freshness)}%")
+    else:
+        st.warning("⚠️ **Mode:** Standard ETL")
+        st.caption("Engine: **CSV/Pickle Legacy**")
+        if st.button("🏗️ Run Optimizer Now", use_container_width=True):
+            script_path = PROJECT_ROOT / "src" / "utils" / "optimize_data.py"
+            if not script_path.exists():
+                st.error(f"Optimizer not found: {script_path}")
+                return
+
+            with st.spinner("Rebuilding Optimized Data Layer..."):
+                exit_code = os.system(f'"{sys.executable}" "{script_path}"')
+
+            if exit_code == 0:
+                st.cache_data.clear()
+                st.cache_resource.clear()
+                st.toast("✅ Optimization Complete!")
+                st.rerun()
+            else:
+                st.error("Optimizer failed. Check terminal/log output.")
 
 # Load Global State
 model, feature_list, imputer, scaler, threshold = load_ai_assets()
@@ -532,6 +564,8 @@ def render_sidebar(df: pd.DataFrame) -> Tuple[Dict[str, Any], pd.DataFrame]:
     active_df = pd.DataFrame()
 
     with st.sidebar:
+        render_performance_status(df)
+
         try:
             st.image("https://www.te.com/content/dam/te-com/global/english/about-te/news-center/te-logo.png", width=150)
         except Exception:
@@ -1028,11 +1062,37 @@ def render_user_guide() -> None:
     with tab_docs:
         st.markdown(
             """```mermaid
-flowchart LR
-    A[Raw Data] --> B[Universal Loader]
-    B --> C[Physics Check]
-    C --> D[ML Model]
-    D --> E[Dashboard]
+graph LR
+    subgraph "Legacy / Raw Data Layer"
+        A[☁️ M231.csv (1.5GB)]
+        B[☁️ M356.csv (1.5GB)]
+        C[☁️ M471.csv (1.5GB)]
+        D[☁️ ...Others]
+    end
+
+    subgraph "ETL & Optimization Layer"
+        E[⚙️ Python Preprocessor]
+        F[📉 Downcasting & Cleaning]
+        G[📦 Parquet Conversion]
+    end
+
+    subgraph "Application Layer"
+        H[🚀 Optimized_Data.parquet (Compressed)]
+        I[📊 Streamlit Dashboard]
+        J[🧠 AI Model]
+    end
+
+    A & B & C & D --> E
+    E --> F --> G
+    G --> H
+    H --> I
+    I --> J
+
+    style A fill:#ffcccc,stroke:#333
+    style B fill:#ffcccc,stroke:#333
+    style C fill:#ffcccc,stroke:#333
+    style H fill:#ccffcc,stroke:#333
+    style I fill:#ccffcc,stroke:#333
 ```"""
         )
 
