@@ -1,297 +1,303 @@
-import pandas as pd
-import numpy as np
-import joblib
-import sys
-import os
+from __future__ import annotations
+
+import json
 import logging
+import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-# =========================================================
-# CONFIGURATION & SETUP
-# =========================================================
-# Configure Logging to standard output
+import joblib
+import numpy as np
+import pandas as pd
+
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - [REPORTING] - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
+    format="%(asctime)s - [REPORTING] - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("TE_Reporter")
 
-# Import Config & Data Loader (Graceful Fallback)
-# This block allows the script to find the 'src' folder even if run from different locations
+
 try:
     import src.config as cfg
     from src.data_loading import load_and_merge_data
 except ImportError:
-    # If standard import fails, try appending parent directory to path
     sys.path.append(str(Path.cwd().parent))
     try:
         import src.config as cfg
         from src.data_loading import load_and_merge_data
     except ImportError:
-        # Fallback if config cannot be found
-        logger.warning("Could not import src.config. Using default paths.")
+        logger.warning("Could not import src.config. Using fallback defaults.")
+
         class cfg:
-            MODELS_DIR = Path('models')
-            REPORTS_DIR = Path('reports')
-        
-        def load_and_merge_data():
+            MODELS_DIR = Path("models")
+            REPORTS_DIR = Path("reports")
+            DATA_DIR = Path("data")
+
+        def load_and_merge_data() -> pd.DataFrame:
             return pd.DataFrame()
 
-# =========================================================
-# PRESCRIPTIVE ANALYTICS ENGINE
-# =========================================================
+
 class PrescriptiveReporter:
     """
-    Generates actionable business intelligence reports.
-    Feature: Simulates physics adjustments to find 'Cures' for high-risk batches.
+    Layer 2 Prescriptive AI:
+    Converts scrap-risk predictions into physical, operator-level actions.
     """
 
-    def __init__(self):
-        # Initialize paths based on config
-        self.models_dir = getattr(cfg, 'MODELS_DIR', Path('models'))
-        self.reports_dir = getattr(cfg, 'REPORTS_DIR', Path('reports'))
-        
-        # Ensure report directory exists
-        if not self.reports_dir.exists():
-            logger.info(f"Creating reports directory at: {self.reports_dir}")
-            self.reports_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Internal State storage
+    def __init__(self) -> None:
+        self.models_dir = getattr(cfg, "MODELS_DIR", Path("models"))
+        self.reports_dir = getattr(cfg, "REPORTS_DIR", Path("reports"))
+        self.data_dir = getattr(cfg, "DATA_DIR", Path("data"))
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+
         self.model = None
-        self.features = None
+        self.features: List[str] = []
         self.imputer = None
         self.scaler = None
-        self.threshold = 0.5
+        self.threshold: float = 0.5
 
-    def load_assets(self):
-        """
-        Loads the trained AI brain from disk.
-        Returns True if successful, False otherwise.
-        """
+        self.rule_thresholds = self._load_rule_thresholds()
+        self.causal_map = {
+            "cushion": "Check Switch Position & Holding Pressure",
+            "injection_time": "Check Injection Speed profile",
+            "dosage_time": "Check Dosing Speed (RPM) and material feeding",
+            "plasticizing_time": "Check Dosing Speed (RPM) and material feeding",
+            "cycle_time": "Check Mold Movements & cooling/injection speeds",
+            "cyl_tmp_z": "Check Heating Zones and barrel thermal stability",
+        }
+
+    def _load_rule_thresholds(self) -> Dict[str, float]:
+        """Loads dynamic thresholds from data/monitoring_config.json with defaults."""
+        defaults = {
+            "cushion": 0.5,
+            "injection_time": 0.03,
+            "dosage_time": 1.0,
+            "plasticizing_time": 1.0,
+            "injection_pressure": 100.0,
+            "switch_pressure": 100.0,
+            "cyl_tmp_z": 5.0,
+        }
+        cfg_path = self.data_dir / "monitoring_config.json"
+        if not cfg_path.exists():
+            return defaults
+
         try:
-            logger.info("⏳ Loading AI Assets for Reporting...")
-            
-            # Define paths to assets
+            raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+            for key, val in raw.items():
+                if isinstance(val, dict) and "threshold" in val:
+                    try:
+                        defaults[str(key).strip().lower()] = float(val["threshold"])
+                    except Exception:
+                        continue
+            return defaults
+        except Exception as exc:
+            logger.warning("Failed to read monitoring_config.json (%s). Using defaults.", exc)
+            return defaults
+
+    def load_assets(self) -> bool:
+        """Loads trained model artifacts required for inference."""
+        try:
             model_path = self.models_dir / "scrap_model.joblib"
             feat_path = self.models_dir / "model_features.joblib"
             imp_path = self.models_dir / "imputer.joblib"
             scl_path = self.models_dir / "scaler.joblib"
             thr_path = self.models_dir / "threshold.joblib"
 
-            # Verify files exist before loading
-            for p in [model_path, feat_path, imp_path, scl_path, thr_path]:
-                if not p.exists():
-                    logger.error(f"❌ Missing critical asset: {p}")
-                    return False
-
-            # Load assets
+            if not model_path.exists():
+                logger.error("Missing model artifact: %s", model_path)
+                return False
             self.model = joblib.load(model_path)
-            self.features = joblib.load(feat_path)
-            self.imputer = joblib.load(imp_path)
-            self.scaler = joblib.load(scl_path)
-            self.threshold = joblib.load(thr_path)
-            
-            logger.info(f"✅ Assets Loaded Successfully. Active Risk Threshold: {self.threshold:.1%}")
+
+            if feat_path.exists():
+                self.features = list(joblib.load(feat_path))
+            else:
+                self.features = list(getattr(self.model, "training_features_", []))
+
+            if not self.features:
+                logger.error("Feature list not found in artifacts/model metadata.")
+                return False
+
+            if imp_path.exists():
+                self.imputer = joblib.load(imp_path)
+            if scl_path.exists():
+                self.scaler = joblib.load(scl_path)
+            if thr_path.exists():
+                self.threshold = float(joblib.load(thr_path))
+
+            logger.info("Assets loaded. Threshold: %.2f", self.threshold)
             return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to load assets: {e}")
-            logger.error("   Tip: Run 'python -m src.train_model' to generate them.")
+        except Exception as exc:
+            logger.error("Failed to load assets: %s", exc)
             return False
 
-    def get_prescriptive_advice(self, row, current_prob):
-        """
-        [The 'Secret Sauce'] 
-        Simulates changing machine parameters to see if risk drops.
-        Returns the best physics-based advice string.
-        """
-        # If risk is low, no action needed
-        if current_prob < self.threshold:
-            return "✅ Optimal Settings"
+    @staticmethod
+    def _to_float(value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            numeric = float(value)
+            if np.isnan(numeric):
+                return None
+            return numeric
+        except Exception:
+            return None
 
-        best_advice = "🔍 Inspect Material / Mold"
-        best_improvement = 0.0
-        
-        # Parameters we are allowed to tweak (Operator Controls)
-        tunable_params = [
-            'injection_pressure', 
-            'cycle_time', 
-            'cushion', 
-            'cyl_tmp_z1', 
-            'melt_temp', 
-            'back_pressure'
-        ]
-        
-        # Simulation Logic
-        for param in tunable_params:
-            # Skip if parameter data is missing
-            if param not in row or row[param] == 0:
+    def _rule_breach(self, row: Dict[str, Any], baseline: Dict[str, float], key: str, threshold: float) -> bool:
+        value = self._to_float(row.get(key))
+        target = self._to_float(baseline.get(key))
+        if value is None or target is None:
+            return False
+        return abs(value - target) > threshold
+
+    def _cylinder_zone_breach(self, row: Dict[str, Any], baseline: Dict[str, float], threshold: float) -> bool:
+        zone_cols = [k for k in row.keys() if str(k).lower().startswith("cyl_tmp_z")]
+        for col in zone_cols:
+            value = self._to_float(row.get(col))
+            target = self._to_float(baseline.get(col))
+            if value is None or target is None:
                 continue
-                
-            original_val = row[param]
-            
-            # Scenario A: Decrease by 5%
-            val_down = original_val * 0.95
-            
-            # Scenario B: Increase by 5%
-            val_up = original_val * 1.05
-            
-            # Test both scenarios
-            for val, direction in [(val_down, "Decrease"), (val_up, "Increase")]:
-                # Create a synthetic row copy
-                sim_row = row.copy()
-                sim_row[param] = val
-                
-                # Re-calculate lag features if they exist (Physics Consistency)
-                if f"{param}_lag_1" in sim_row:
-                    sim_row[f"{param}_lag_1"] = original_val 
-                
-                # Transform & Predict
-                # Create single-row DataFrame
-                sim_df = pd.DataFrame([sim_row], columns=self.features)
-                
-                # Scale using the loaded scaler
-                sim_scaled = self.scaler.transform(sim_df)
-                
-                # Get new prediction probability
-                new_prob = self.model.predict_proba(sim_scaled)[0][1]
-                
-                # Calculate improvement
-                improvement = current_prob - new_prob
-                
-                # If significant improvement found, save it
-                if improvement > 0.05 and improvement > best_improvement:
-                    best_improvement = improvement
-                    best_advice = f"{direction} {param} by 5% (to {val:.1f})"
+            if abs(value - target) > threshold:
+                return True
+        return False
 
-        if best_improvement > 0:
-            return f"💡 {best_advice} (Est. Risk -{best_improvement:.1%})"
-        
-        return "⚠️ Complex Issue - Technician Required"
+    def get_prescriptive_advice(self, row: Dict[str, Any], risk_score: float, baseline: Dict[str, float]) -> str:
+        """
+        Causal prescriptive logic:
+        - Cushion -> Switch Position & Holding Pressure
+        - Injection Time -> Injection Speed
+        - Dosage Time -> Dosing Speed
+        - Cycle Time -> Mold Movements & Speeds
+        - Cyl_tmp -> Heating Zones
+        """
+        if risk_score < self.threshold:
+            return "✅ Maintain Parameters"
 
-    def generate(self):
-        """
-        Main execution flow.
-        Loads data, predicts risk, generates advice, and saves reports.
-        """
-        # Load Assets
+        advice: List[str] = []
+
+        if self._rule_breach(row, baseline, "cushion", self.rule_thresholds.get("cushion", 0.5)):
+            advice.append("🔴 Cushion Drift: Check Switch Position & Holding Pressure.")
+
+        if self._rule_breach(row, baseline, "injection_time", self.rule_thresholds.get("injection_time", 0.03)):
+            advice.append("⚠️ Injection Time Drift: Check Injection Speed profile.")
+
+        dosage_threshold = self.rule_thresholds.get("dosage_time", self.rule_thresholds.get("plasticizing_time", 1.0))
+        dosage_breach = self._rule_breach(row, baseline, "dosage_time", dosage_threshold) or self._rule_breach(
+            row, baseline, "plasticizing_time", dosage_threshold
+        )
+        if dosage_breach:
+            advice.append("⚠️ Dosage Drift: Check Dosing Speed (RPM) and material feeding.")
+
+        cycle_base = self._to_float(baseline.get("cycle_time"))
+        cycle_threshold = max(1.0, (cycle_base or 0.0) * 0.05)
+        if self._rule_breach(row, baseline, "cycle_time", cycle_threshold):
+            advice.append("ℹ️ Cycle Time Drift: Check Mold Movements & speeds.")
+
+        cyl_threshold = self.rule_thresholds.get("cyl_tmp_z", 5.0)
+        if self._cylinder_zone_breach(row, baseline, cyl_threshold):
+            advice.append("🌡️ Heating Zone Drift: Check cylinder zone temperatures and heater stability.")
+
+        if hasattr(self.model, "feature_importances_") and self.features:
+            try:
+                importances = np.asarray(self.model.feature_importances_)
+                if len(importances) == len(self.features):
+                    top_idx = np.argsort(importances)[::-1][:3]
+                    top_factors = [self.features[i] for i in top_idx]
+                    advice.append(f"🔍 Top Learned Risk Factors: {', '.join(top_factors)}")
+            except Exception:
+                pass
+
+        if not advice:
+            return "⚠️ High Risk: Investigate Injection Speed, Dosing, and Mold movements."
+        return " | ".join(advice)
+
+    def generate(self) -> bool:
         if not self.load_assets():
             return False
 
-        # 1. Load Data
-        logger.info("📥 Loading latest production data...")
+        logger.info("Loading latest merged production data...")
         df = load_and_merge_data()
-        
         if df.empty:
-            logger.warning("❌ No data available for reporting.")
+            logger.warning("No data available for report generation.")
             return False
 
-        # 2. Align Features
-        # Ensure input DF has all required columns (fill 0 if missing)
         X = df.copy()
         for f in self.features:
             if f not in X.columns:
-                X[f] = 0
+                X[f] = np.nan
         X = X[self.features]
 
-        # 3. Preprocess (Impute Only First)
-        # We need unscaled data for the advice engine, but imputed data for validity
-        logger.info("🛠️  Running Preprocessing...")
-        X_imputed = pd.DataFrame(self.imputer.transform(X), columns=self.features, index=X.index)
-        
-        # Scale for final prediction
-        X_scaled = self.scaler.transform(X_imputed)
+        if self.imputer is not None:
+            X_imputed = pd.DataFrame(self.imputer.transform(X), columns=self.features, index=X.index)
+        else:
+            X_imputed = X.fillna(0)
 
-        # 4. Batch Prediction
-        logger.info(f"🔮 Scoring {len(df)} production records...")
+        if self.scaler is not None:
+            X_scaled = self.scaler.transform(X_imputed)
+        else:
+            X_scaled = X_imputed.values
+
         probs = self.model.predict_proba(X_scaled)[:, 1]
-        
-        # 5. Classify Risk
-        df['Scrap_Probability'] = probs
-        df['Risk_Level'] = pd.cut(
-            probs, 
-            bins=[-0.1, self.threshold - 0.1, self.threshold, 0.85, 1.1], 
-            labels=["SAFE 🟢", "WARNING 🟡", "HIGH RISK 🔴", "CRITICAL 🛑"]
-        )
+        df["Scrap_Probability"] = probs
 
-        # 6. Generate Advice (Loop)
-        # Only run deep simulation for High/Critical risk to save time
-        logger.info("🧠 Generating Prescriptive Advice (This may take a moment)...")
-        advice_list = []
-        
-        # Convert to records for faster iteration
-        records = X_imputed.to_dict('records')
-        
+        safe_limit = max(0.0, self.threshold - 0.1)
+        critical_limit = max(0.90, self.threshold + 0.05)
+        conditions = [
+            (df["Scrap_Probability"] < safe_limit),
+            (df["Scrap_Probability"] < self.threshold),
+            (df["Scrap_Probability"] < critical_limit),
+        ]
+        choices = ["SAFE 🟢", "WARNING 🟡", "HIGH RISK 🔴"]
+        df["Risk_Level"] = np.select(conditions, choices, default="CRITICAL 🛑")
+
+        numeric_df = df.apply(pd.to_numeric, errors="coerce")
+        baseline = numeric_df.median(numeric_only=True).to_dict()
+        records = df.to_dict("records")
+
+        advice_list: List[str] = []
         for idx, row in enumerate(records):
-            prob = probs[idx]
-            # Only simulate if risk is above threshold to save compute time
-            if prob >= self.threshold:
-                advice = self.get_prescriptive_advice(row, prob)
-            else:
-                advice = "✅ Maintain Parameters"
-            advice_list.append(advice)
-            
-        df['AI_Recommendation'] = advice_list
+            risk = float(probs[idx])
+            advice_list.append(self.get_prescriptive_advice(row, risk, baseline))
+        df["AI_Recommendation"] = advice_list
 
-        # 7. Format & Export
-        # Select user-friendly columns
-        base_cols = ['machine_id', 'timestamp', 'Risk_Level', 'Scrap_Probability', 'AI_Recommendation', 'scrap_rate']
-        # Add top 5 features for context
-        top_features = self.features[:5]
-        export_cols = base_cols + top_features
-        
-        # Filter existing columns
-        final_cols = [c for c in export_cols if c in df.columns]
-        
-        # Sort by Risk (Worst first)
-        final_report = df[final_cols].sort_values('Scrap_Probability', ascending=False)
-        
-        # Save Report
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        filename = self.reports_dir / f"Scrap_Analysis_Report_{timestamp}.csv"
-        
-        final_report.to_csv(filename, index=False)
-        
-        # Create "Action List" (Filtered view)
-        action_filename = self.reports_dir / f"ACTION_REQUIRED_{timestamp}.csv"
-        action_items = final_report[final_report['Scrap_Probability'] >= self.threshold]
-        action_items.to_csv(action_filename, index=False)
+        base_cols = [
+            "machine_id",
+            "timestamp",
+            "Risk_Level",
+            "Scrap_Probability",
+            "AI_Recommendation",
+            "scrap_rate",
+        ]
+        final_cols = [c for c in base_cols + self.features[:5] if c in df.columns]
+        final_report = df[final_cols].sort_values("Scrap_Probability", ascending=False)
 
-        # Summary
-        logger.info("-" * 40)
-        logger.info("📊 REPORT GENERATION COMPLETE")
-        logger.info("-" * 40)
-        logger.info(f"📄 Full Report:    {filename}")
-        logger.info(f"🚨 Action Items:   {len(action_items)} orders require attention.")
-        logger.info(f"📂 Saved to:       {action_filename}")
-        logger.info("-" * 40)
-        
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        full_path = self.reports_dir / f"Scrap_Analysis_Report_{ts}.csv"
+        action_path = self.reports_dir / f"ACTION_REQUIRED_{ts}.csv"
+
+        final_report.to_csv(full_path, index=False)
+        action_items = final_report[final_report["Scrap_Probability"] >= self.threshold]
+        action_items.to_csv(action_path, index=False)
+
+        logger.info("Report generation complete.")
+        logger.info("Full Report: %s", full_path)
+        logger.info("Action Items: %d", len(action_items))
         return True
 
-# =========================================================
-# 🌉 BRIDGE FUNCTION (Fixes the Import Error)
-# =========================================================
-def generate_report():
-    """
-    Wrapper function that the pipeline expects to call.
-    This creates the reporter instance and runs the generation process.
-    Returns True if successful, False otherwise.
-    """
+
+def generate_report() -> bool:
+    """Pipeline entrypoint expected by run_pipeline.py."""
     try:
         reporter = PrescriptiveReporter()
-        success = reporter.generate()
-        return success
-    except Exception as e:
-        logger.error(f"❌ Critical Error in Reporting Engine: {e}")
+        return reporter.generate()
+    except Exception as exc:
+        logger.error("Critical reporting failure: %s", exc)
         traceback.print_exc()
         return False
 
-# =========================================================
-# MAIN EXECUTION
-# =========================================================
+
 if __name__ == "__main__":
-    # If run directly, execute the function
     generate_report()
+

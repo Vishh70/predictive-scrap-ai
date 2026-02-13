@@ -1,5 +1,7 @@
 import os
+import logging
 from pathlib import Path
+from typing import Optional, Union
 
 # =========================================================
 # 📂 1. PROJECT DIRECTORY ARCHITECTURE
@@ -30,41 +32,72 @@ for d in [DATA_DIR, RAW_DIR, PROCESSED_DIR, MODELS_DIR, REPORTS_DIR, LOGS_DIR, A
 # The pipeline uses these patterns to find the right CSV files.
 # Case-insensitive matching is handled in the loading script.
 HYDRA_PATTERN = "*Hydra*.csv"      # Production Order Data
-PARAM_PATTERN = "*Param*.csv"      # Machine Sensor Data
+PARAM_PATTERN = "*.csv"            # Scan all CSV files; loader keeps only valid parameter schemas
 BACKUP_PATTERN = "*Backup*.csv"    # For archival
 
 # =========================================================
 # ⚙️ 3. SENSOR & PHYSICS CONFIGURATION (THE "CONTRACT")
 # =========================================================
-# This is the "Golden List". The AI will ONLY look at these columns.
-# It protects the model from training on noise or accidental ID columns.
 
+# 1. TRANSLATION MAP (Excel Header -> Python Name)
+# This dictionary maps the strange names in your CSV to clean names for AI.
+COLUMN_MAPPING = {
+    # Time & Speed
+    "Act Cycle Time":       "cycle_time",
+    "Act Inj Time":         "injection_time",
+    "Act Fill Time":        "fill_time",
+    "Act Charge Time":      "plasticizing_time",  # 'Charge' often equals 'Plasticizing'
+
+    # Pressures
+    "Max Inj Pres":         "max_injection_pressure",
+    "Act Hold Pres":        "holding_pressure",
+    "Act Back Pres":        "back_pressure",
+    "Act Switch Pres":      "switch_pressure",
+
+    # Geometry / Positions
+    "Act Switch Vol":       "switch_over_volume",
+    "Act Cushion":          "cushion",
+    "Act Charge Pos":       "plasticizing_position",
+
+    # Temperatures
+    "Act Melt Temp":        "melt_temp",
+    "Act Mold Temp":        "mold_temperature",
+    "Act Oil Temp":         "oil_temperature",
+    
+    # Zone Temperatures (Barrel Heating)
+    "Act Zone 1 Temp":      "cyl_tmp_z1",
+    "Act Zone 2 Temp":      "cyl_tmp_z2",
+    "Act Zone 3 Temp":      "cyl_tmp_z3",
+    "Act Zone 4 Temp":      "cyl_tmp_z4",
+    "Act Zone 5 Temp":      "cyl_tmp_z5"
+}
+
+# 2. THE GOLDEN LIST
+# Canonical simplified names expected after cleaning/normalization.
 REQUIRED_PARAM_COLS = [
-    # -- Times (Speed) --
+    "injection_pressure",
     "cycle_time",
+    "cushion",
     "injection_time",
     "plasticizing_time",
-    "dosage_time",
-    
-    # -- Pressures (Force) --
-    "max_injection_pressure",
-    "injection_pressure",
-    "switch_pressure",
-    "back_pressure",
-    
-    # -- Volumes & Positions (Geometry) --
-    "switch_over_volume",
-    "cushion",               # Critical for part density
-    "plasticizing_position",
-    
-    # -- Temperatures (Thermodynamics) --
-    "barrel_temperature",
+    "max_injection_speed",
+    "transfer_pressure",
+    "cyl_tmp_z1",
+    "cyl_tmp_z2",
+    "cyl_tmp_z3",
+    "cyl_tmp_z4",
+    "melt_temp",
     "mold_temperature",
     "oil_temperature",
-    "melt_temp",
-    
-    # -- Zone Specific Temps --
-    "cyl_tmp_z1", "cyl_tmp_z2", "cyl_tmp_z3", "cyl_tmp_z4", "cyl_tmp_z5"
+    "holding_pressure",
+    "back_pressure",
+    "switch_pressure",
+    "switch_over_volume",
+    "plasticizing_position",
+    "flange_temperature",
+    "nozzle_temperature",
+    "mold_protection_force_peak",
+    "clamping_force_peak",
 ]
 
 # =========================================================
@@ -83,6 +116,34 @@ VALIDATION_SPLIT = 0.1   # 10% used during training for early stopping
 DEFAULT_THRESHOLD = 0.35 # Conservative starting point. 
                          # The training script will optimize this automatically using F2-Score.
 
+# =========================================================
+# 🚨 4B. DASHBOARD SAFETY & MONITORING CONSTANTS
+# =========================================================
+# Centralized constants to avoid magic numbers across app/ETL code.
+CRITICAL_RISK_THRESHOLD = 0.85
+WARNING_RISK_THRESHOLD = 0.35
+FORECAST_HORIZON_MINUTES = 60
+SAFE_ZONE_SIGMA_MULTIPLIER = 3.0
+VOLATILITY_WINDOW = 10
+
+# =========================================================
+# 🧪 4C. PHYSICS SAFETY GUARDRAILS
+# =========================================================
+PHYSICS_RANGES = {
+    'injection_pressure': (0, 2000),  # Bar
+    'melt_temp': (100, 400),          # Celsius
+    'cycle_time': (0, 120),           # Seconds
+}
+
+# Minimum physically valid cycle time used for post-merge filtering.
+MIN_VALID_CYCLE_TIME_SEC = 1.0
+
+# Feature engineering controls
+SLOPE_LAG_WINDOW = 5
+
+# Prescriptive safety rule: saturation warning near hard limits
+PARAM_SATURATION_RATIO = 0.995
+
 # Business Rules
 SCRAP_RATE_THRESHOLD = 0.02  # If >2% of a batch is bad, label the whole batch as "High Risk"
 
@@ -91,3 +152,37 @@ SCRAP_RATE_THRESHOLD = 0.02  # If >2% of a batch is bad, label the whole batch a
 # =========================================================
 DEBUG_MODE = False       # Set to True to see verbose logs in terminal
 ENABLE_CACHE = True      # Speed up reloading by saving processed pickles
+
+
+def get_logger(
+    name: str,
+    log_file: Optional[Union[str, Path]] = None,
+    level: int = logging.INFO
+) -> logging.Logger:
+    """
+    Build or retrieve a logger with enterprise-standard formatting.
+
+    Format:
+        %(asctime)s - [%(name)s] - %(levelname)s - %(message)s
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.propagate = False
+
+    formatter = logging.Formatter(
+        "%(asctime)s - [%(name)s] - %(levelname)s - %(message)s"
+    )
+
+    if not logger.handlers:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+
+        if log_file is not None:
+            file_path = Path(log_file)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.FileHandler(file_path, encoding="utf-8")
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+
+    return logger
