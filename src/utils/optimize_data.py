@@ -26,7 +26,12 @@ def _downcast_numeric(df: pd.DataFrame) -> pd.DataFrame:
 
 def optimize_for_demo() -> None:
     if not INPUT_PATH.exists():
-        raise FileNotFoundError(f"Input file not found: {INPUT_PATH}")
+        raise FileNotFoundError(
+            f"Input file not found: {INPUT_PATH}\n"
+            "This optimizer expects the cached dataframe pickle.\n"
+            "Create parquet for training first with: python preprocess_data.py\n"
+            "Then create this pickle cache via app/data loader before running this script."
+        )
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 

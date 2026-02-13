@@ -24,6 +24,51 @@ CHUNK_SIZE = 500_000
 REQUIRED_COLS: List[str] = []
 
 
+def _is_machine_timeseries_csv(file_path: str) -> tuple[bool, str]:
+    """
+    Detect whether a CSV looks like machine telemetry data.
+    This prevents metadata/reference CSVs from becoming the Parquet schema.
+    """
+    try:
+        header_df = pd.read_csv(file_path, nrows=0)
+    except Exception as exc:
+        return False, f"header read failed ({exc})"
+
+    cols = {str(c).strip().lower() for c in header_df.columns}
+    has_machine = any(c in cols for c in ("machine_definition", "machine_def", "machine_id"))
+    has_timestamp = any(c in cols for c in ("timestamp", "time", "event_time", "datetime"))
+    has_variable = any(c in cols for c in ("variable_name", "sensor", "parameter", "param"))
+    has_value = any(c in cols for c in ("value", "sensor_value", "reading"))
+
+    if has_machine and has_timestamp and has_variable and has_value:
+        return True, ""
+    return False, "missing machine/timestamp/variable/value columns"
+
+
+def _select_input_files() -> List[str]:
+    files = sorted(glob.glob(os.path.join(DATA_FOLDER, "*.csv")))
+    print(f"Discovered {len(files)} CSV files in '{DATA_FOLDER}'.")
+    if not files:
+        return []
+
+    selected: List[str] = []
+    skipped: List[str] = []
+
+    for file in files:
+        ok, reason = _is_machine_timeseries_csv(file)
+        if ok:
+            selected.append(file)
+        else:
+            skipped.append(f"{os.path.basename(file)} ({reason})")
+
+    print(f"Selected {len(selected)} machine telemetry CSV files.")
+    if selected:
+        print(f"Files to process: {[os.path.basename(f) for f in selected]}")
+    if skipped:
+        print(f"Skipped {len(skipped)} non-telemetry CSV files: {skipped}")
+    return selected
+
+
 def optimize_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
     """Apply memory optimizations on each chunk."""
     if REQUIRED_COLS:
@@ -87,12 +132,12 @@ def to_arrow_safe(chunk: pd.DataFrame) -> pd.DataFrame:
 
 
 def main() -> None:
-    files = sorted(glob.glob(os.path.join(DATA_FOLDER, "*.csv")))
-    print(f"Found {len(files)} files: {[os.path.basename(f) for f in files]}")
+    files = _select_input_files()
 
     if not files:
         raise SystemExit(
-            f"No CSV files found in '{DATA_FOLDER}'. Put raw CSV files there first."
+            "No machine telemetry CSV files were found in 'data/'. "
+            "Add files with machine/timestamp/variable/value columns."
         )
 
     output_path = Path(OUTPUT_FILE)
